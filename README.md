@@ -125,6 +125,171 @@ Main considerations:
 - The validated data will be loaded to a staging dataset in the Data Warehouse on an append only mode - table partitioned by date in order to allow an indepondent data pipeline for each day and improve performance.
 - We will have dbt tool to apply transformations and data modeling in the data warehouse.
 
+Below you can find the data architecture overview:
+
+![Data Architecture](assets/yc-data-platform.jpg)
+
+Based on the proposed data architecture overview, the data pipeline would be developed as follows for the mentioned case:
+
+1. The data pipeline would be orchestrated by Apache Airflow.
+2. The data pipeline would be scheduled to run daily.
+3. The data pipeline would start by extracting the data from the source database in brach mode through a custom Python/Docker operator to run the necessary queries agasint the database.
+4. The extracted data would be saved in a raw layer in the data lake (S3 bucket) in JSON format.
+   - Raw layer is a very restricted data lake layer. It's only used to store the raw data in order to enable us a reproducible data pipeline in case of need.
+   - Retention policy should be applied in order to improve the cost of the data lake.
+     - We could use a lifecycle policy to move the data to a cheaper storage class after a certain period of time.
+5. The raw data would be parsed and saved in parquet format in a conformed layer in the data lake.
+   - This parse implies in applying data contracts in order to ensure data quality.
+     - In case of issues with the data, the data pipeline would be stopped and the data engineering team would be notified along with the data owner.
+     - The error handling can be done in different steps, considering error that can be retried and others that should be fixed before the data pipeline can be restarted.
+     - SLA policies should be applied there as well.
+6. The validated data would be loaded to a staging dataset in the Data Warehouse on an append only mode.
+   - The table would be partitioned by date in order to allow an indepondent data pipeline for each day and improve performance.
+7. dbt tool would be used to apply the transformations and model the data to a more analytics ready data model.
+8. The data monitoring can be a combination of Airflow logs, Datahub, Monte Carlo, etc.
+9. Last but not least, I would consider a data catalog tool like Datahub
+   - It would be used to document the data and enable the data consumers to find the data they need.
+   - Every data pipeline step should register the consumed and produced data in the data catalog.
+   - It would also be used to document the data contracts and data quality rules.
+
+#### Data Modeling
+
+Once the data is already available in the data warehouse, we can start to apply the better data modeling techinique. In this case, since it's not very clear what questions we are trying to answer, I would go for a Kimball-like star schema, where we have a fact table with the main metrics and dimension tables with the context of the data.
+
+The raw table is kind of a OBT (one big table) with a lot of information and the first thing is to identify what are the models we can create from it.
+
+**Dimension tables:**
+
+NOTE: it's important to properly define the SCD2 implementation in our pipeline to take care of possible late arrivals and updates in the source data.
+
+- dim_store
+  - scd2 table to keep track of the store changes
+- dim_county
+  - scd2 table to keep track of the county changes
+- dim_product
+  - scd2 table to keep track of the product changes
+- dim_vendor
+  - scd2 table to keep track of the vendor changes
+- dim_date
+  - auxiliar date table to help with date related queries
+
+**Fact table:**
+
+- fact_sales
+  - This table will contain the main metrics of the sales, such as: revenue, quantity sold, etc.
+  - Granularity: sale date
+- fact_stock (from the raw table in this exercise, would not be possible to fully achieve this model without more information about transactions of product bought by the stores)
+  - This table will contain the main metrics of the products bought by the stores, such as: quantity bought, cost, etc.
+  - Granularity: purchase date
+
+![data-modeling](assets/yc-data-model.png)
+
+NOTE: data modeling diagram has been created with https://dbdiagram.io tool. You can use below code to replicate it in the website if needed.
+
+```
+// Use DBML to define your database structure
+// Docs: https://dbml.dbdiagram.io/docs
+
+Table dim_date {
+  id integer [primary key]
+  full_date date
+  year integer
+  year_day integer
+  fiscal_year integer
+  fiscal_qtr integer
+  month integer
+  month_name string
+  week_day int
+  day_name string
+  day_is_weekday bool
+}
+
+Table dim_store {
+  sk_store string [primary key]
+  store_number integer
+  name varchar
+  address varchar
+  city varchar
+  zip_code varchar
+  location geo
+  date_from timestamp
+  date_to timestamp
+  is_current bool
+}
+
+Table dim_county {
+  sk_county string [primary key]
+  county_id integer
+  name string
+  date_from timestamp
+  date_to timestamp
+  is_current bool
+}
+
+Table dim_category {
+  sk_category string [primary key]
+  category_id integer
+  name string
+  date_from timestamp
+  date_to timestamp
+  is_current bool
+}
+
+Table dim_vendor {
+  sk_vendor string [primary key]
+  vendor_id integer
+  name string
+  date_from timestamp
+  date_to timestamp
+  is_current bool
+}
+
+Table dim_product {
+  sk_product string [primary key]
+  product_id integer
+  category_fk string
+  description string
+  bottle_volume_ml float
+  date_from timestamp
+  date_to timestamp
+  is_current bool
+}
+
+Table fact_sales {
+  sale_id string [primary key]
+  date_fk integer
+  product_fk string
+  store_fk string
+  county_fk string
+  bottles_sold integer
+  sale_dollars float
+  volume_sold_liters float
+  volume_sold_gallons float
+}
+
+Table fact_stock {
+  transaction_id string [primary key]
+  date_fk id
+  vendor_fk string
+  product_fk string
+  pack integer
+  state_bottle_cost float
+}
+
+
+Ref: fact_stock.date_fk > dim_date.id
+Ref: fact_sales.date_fk > dim_date.id
+
+Ref: dim_product.category_fk > dim_category.sk_category
+
+Ref: fact_sales.product_fk <> dim_product.sk_product
+Ref: fact_sales.store_fk > dim_store.sk_store
+Ref: fact_sales.county_fk > dim_county.sk_county
+
+Ref: fact_stock.vendor_fk > dim_vendor.sk_vendor
+Ref: fact_stock.product_fk > dim_product.sk_product
+```
+
 ## Task #3
 
 ### Question 1
